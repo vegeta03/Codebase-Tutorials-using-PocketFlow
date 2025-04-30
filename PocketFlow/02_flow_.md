@@ -1,346 +1,286 @@
 # Chapter 2: Flow
 
-In [Chapter 1: Node](01_node_.md), we learned about Nodes as the individual workers in our data processing assembly line. Each Node performs a specific task, but how do we connect them together to create a cohesive workflow? That's where Flow comes in!
-
-## What is a Flow?
-
-A Flow is like a subway map or a musical conductor - it connects Nodes together and manages which one should run next. Just as a subway system connects stations with tracks that passengers follow, a Flow connects Nodes with paths that data travels along.
-
-Imagine you're planning a vacation. You need to:
-1. Choose a destination
-2. Book flights
-3. Reserve a hotel
-4. Create an itinerary
-
-You could do all these tasks in one massive function, but it would be cleaner to create a separate Node for each task. A Flow would then connect these Nodes together, making sure each one runs at the right time and in the right order.
-
-## Creating Your First Flow
-
-Let's create a simple text transformation application to demonstrate how Flow works. We'll build on the text processing example from the previous chapter.
-
-First, let's define our Nodes:
-
-```python
-from pocketflow import Node, Flow
-
-class TextInput(Node):
-    def prep(self, shared):
-        """Get text input from user."""
-        text = input("\nEnter text to convert: ")
-        return text
-    
-    def post(self, shared, prep_res, exec_res):
-        """Store the text and ask what to do next."""
-        shared["text"] = prep_res
-        
-        print("\nChoose transformation:")
-        print("1. Convert to UPPERCASE")
-        print("2. Convert to lowercase")
-        print("3. Exit")
-        
-        choice = input("\nYour choice (1-3): ")
-        
-        if choice == "3":
-            return "exit"
-            
-        shared["choice"] = choice
-        return "transform"
-```
-
-This Node gets input from the user and determines what to do next based on their choice.
-
-Next, let's create a Node to transform the text:
-
-```python
-class TextTransform(Node):
-    def prep(self, shared):
-        """Get text and choice from shared storage."""
-        return shared["text"], shared["choice"]
-    
-    def exec(self, inputs):
-        """Transform the text based on user choice."""
-        text, choice = inputs
-        
-        if choice == "1":
-            return text.upper()
-        elif choice == "2":
-            return text.lower()
-        else:
-            return "Invalid option!"
-    
-    def post(self, shared, prep_res, exec_res):
-        """Show result and ask if user wants to continue."""
-        print("\nResult:", exec_res)
-        
-        if input("\nConvert another text? (y/n): ").lower() == 'y':
-            return "input"
-        return "exit"
-```
-
-This Node transforms the text based on the user's choice and decides whether to continue or exit.
-
-Now let's create a simple Node to end our flow:
-
-```python
-class EndNode(Node):
-    def post(self, shared, prep_res, exec_res):
-        """Display a goodbye message."""
-        print("\nThank you for using Text Converter!")
-        return "default"
-```
-
-## Connecting Nodes with Flow
-
-Now comes the magic part - connecting these Nodes together using a Flow:
-
-```python
-# Create our Node instances
-text_input = TextInput()
-text_transform = TextTransform()
-end_node = EndNode()
-
-# Connect the Nodes
-text_input.next(text_transform, "transform")
-text_input.next(end_node, "exit")
-text_transform.next(text_input, "input")
-text_transform.next(end_node, "exit")
-
-# Create our Flow
-flow = Flow(start=text_input)
-
-# Run the Flow
-shared = {}  # Initialize an empty shared store
-flow.run(shared)
-```
-
-Let's break down what's happening:
-
-1. We create instances of each Node
-2. We connect them using the `next()` method, specifying action strings
-3. We create a Flow with `text_input` as the starting Node
-4. We initialize an empty shared store and run the Flow
-
-This creates the following workflow:
-
-```mermaid
-graph TD
-    A[TextInput] -->|transform| B[TextTransform]
-    A -->|exit| C[EndNode]
-    B -->|input| A
-    B -->|exit| C
-```
-
-## A More Elegant Way to Connect Nodes
-
-PocketFlow provides a more elegant syntax for connecting Nodes using the `>>` and `-` operators:
-
-```python
-# Create our Node instances
-text_input = TextInput()
-text_transform = TextTransform()
-end_node = EndNode()
-
-# Connect the Nodes with the elegant syntax
-text_input - "transform" >> text_transform
-text_input - "exit" >> end_node
-text_transform - "input" >> text_input
-text_transform - "exit" >> end_node
-
-# Create our Flow
-flow = Flow(start=text_input)
-```
-
-This does exactly the same thing as our previous example, but it's more readable. The code reads like "if text_input returns 'transform', then go to text_transform".
-
-## How Flow Works Under the Hood
-
-Let's understand what happens when a Flow runs:
-
-```mermaid
-sequenceDiagram
-    participant F as Flow
-    participant N1 as Current Node
-    participant N2 as Next Node
-    participant S as Shared Store
-    
-    F->>F: Start with initial Node
-    loop Until no next Node
-        F->>N1: Run current Node with shared store
-        N1->>N1: Execute Node's prep, exec, post
-        N1-->>F: Return action string
-        F->>F: Look up next Node based on action
-        F->>N2: Make next Node the current Node
-    end
-```
-
-1. The Flow starts with the initial Node
-2. It runs that Node with the shared store
-3. The Node returns an action string
-4. The Flow looks up which Node should run next based on that action
-5. It continues this process until there's no next Node
-
-This orchestration is handled by the `_orch` method in the Flow class:
-
-```python
-def _orch(self, shared, params=None):
-    # Start with the initial node
-    curr = copy.copy(self.start_node)
-    # Initialize parameters and last_action
-    p = (params or {**self.params})
-    last_action = None
-    
-    # Continue as long as there's a current node
-    while curr:
-        # Set parameters on current node
-        curr.set_params(p)
-        # Run the current node
-        last_action = curr._run(shared)
-        # Find the next node based on the returned action
-        curr = copy.copy(self.get_next_node(curr, last_action))
-    
-    # Return the final action
-    return last_action
-```
-
-The Flow simply keeps running Nodes and following their action strings until there are no more Nodes to run.
-
-## A More Complex Example: Decision-Making Flow
-
-Let's look at a more practical example - an agent that decides whether to search for information or answer a question directly:
-
-```python
-from pocketflow import Flow, Node
-
-class DecideAction(Node):
-    def prep(self, shared):
-        """Get question and context."""
-        context = shared.get("context", "No previous search")
-        question = shared["question"]
-        return question, context
-        
-    def exec(self, inputs):
-        """Decide whether to search or answer."""
-        question, context = inputs
-        print(f"🤔 Agent deciding what to do next...")
-        
-        # Simplified decision - in real code, this would use an LLM
-        if "who" in question.lower() or "what" in question.lower():
-            return {"action": "search"}
-        else:
-            return {"action": "answer"}
-    
-    def post(self, shared, prep_res, exec_res):
-        """Return the next action."""
-        return exec_res["action"]
-```
-
-Let's add two more Nodes for searching and answering:
-
-```python
-class SearchWeb(Node):
-    def exec(self, inputs):
-        """Simulate a web search."""
-        print(f"🔍 Searching the web...")
-        # In a real app, this would do an actual search
-        return "Found information about the topic."
-    
-    def post(self, shared, prep_res, exec_res):
-        """Update context and return to decision."""
-        shared["context"] = exec_res
-        return "decide"
-
-class AnswerQuestion(Node):
-    def prep(self, shared):
-        """Get question and context."""
-        return shared["question"], shared.get("context", "")
-    
-    def exec(self, inputs):
-        """Generate an answer."""
-        question, context = inputs
-        print(f"💡 Generating answer...")
-        # In a real app, this would use an LLM
-        return f"Here's an answer about {question} using {context}"
-```
-
-Now let's create our Flow:
-
-```python
-# Create instances of each node
-decide = DecideAction()
-search = SearchWeb()
-answer = AnswerQuestion()
-
-# Connect the nodes
-decide - "search" >> search
-decide - "answer" >> answer
-search - "decide" >> decide
-
-# Create the flow
-flow = Flow(start=decide)
-
-# Run the flow with a question
-shared = {"question": "Who was Albert Einstein?"}
-flow.run(shared)
-```
-
-This creates a workflow like this:
-
-```mermaid
-graph TD
-    A[DecideAction] -->|search| B[SearchWeb]
-    A -->|answer| C[AnswerQuestion]
-    B -->|decide| A
-```
-
-The Flow:
-1. Starts with the DecideAction Node
-2. Decides whether to search or answer
-3. If it searches, it updates the context and goes back to deciding
-4. If it answers, it generates an answer and ends
-
-## Why Flow Matters
-
-Flow provides several key benefits:
-
-1. **Separation of Concerns**: Each Node focuses on one task, making your code more modular
-2. **Reusability**: Nodes can be reused in different Flows
-3. **Flexibility**: You can easily change the workflow by reconnecting Nodes
-4. **Readability**: The workflow is expressed explicitly, making it easier to understand
-5. **Testability**: You can test each Node independently
-
-In our agent example, we could easily modify the Flow to include additional Nodes for citation, summarization, or other tasks. We could even create entirely different Flows using the same Nodes.
-
-## Flow as a Node
-
-One powerful feature of PocketFlow is that a Flow is itself a Node. This means you can nest Flows within other Flows, creating hierarchical workflows.
-
-```python
-# Create a sub-flow
-sub_flow = Flow(start=decide)
-
-# Create a higher-level flow
-main_flow = Flow(start=some_other_node)
-
-# Connect to the sub-flow
-some_other_node - "process" >> sub_flow
-```
-
-This allows you to build complex applications from smaller, reusable components.
-
-## Conclusion
-
-In this chapter, we've learned about **Flow** - the conductor that orchestrates Nodes to form a processing pipeline. We've seen how to create Flows, connect Nodes together, and run them to perform complex tasks.
-
-Flows bring Nodes to life by determining which one to run next based on their output. This orchestration enables us to build flexible, modular applications that are easy to understand and modify.
-
-Key takeaways about Flow:
-- A Flow connects Nodes together to form a processing pipeline
-- Nodes return action strings to tell the Flow what to do next
-- The Flow uses these action strings to determine which Node to run next
-- Flows can be nested within other Flows
-
-In the next chapter, we'll explore the [Shared Store](03_shared_store_.md) - the mechanism that allows Nodes within a Flow to share data with each other.
+As we saw in [Node](01_node_.md), Nodes encapsulate a three‐phase lifecycle (`prep` → `exec` → `post`) and dynamically return an action label to drive transitions. However, manually invoking Nodes one by one and wiring control flow in application code quickly becomes tedious and error‐prone. **Flow** automates this orchestration, executing a directed graph of Nodes from a designated start node until termination.
 
 ---
 
-Generated by [AI Codebase Knowledge Builder](https://github.com/The-Pocket/Tutorial-Codebase-Knowledge)
+## 1. Motivation & Central Use Case
+
+Imagine our ETL pipeline from [Chapter 1](01_node_.md):
+
+1. **Load** raw sensor readings from a database.  
+2. **Transform** them into standardized units.  
+3. **Save** the cleaned data to a time‐series store.
+
+We already authored three Nodes:
+
+- `LoadReadingsNode`  
+- `TransformReadingsNode`  
+- `SaveResultsNode`  
+
+What’s left is wiring them into a workflow that:
+
+- Routes control based on each Node’s returned action (`"default"`, `"no_data"`, etc.).  
+- Propagates shared state (and optional parameters) across all steps.  
+- Handles retries, side‐effects, and clean shutdown when no successor remains.
+
+Enter **Flow**: a synchronous directed-graph executor, akin to a finite-state machine or packet router, which:
+
+- Takes a **start node**.  
+- Repeatedly **clones** the current node (to avoid leftover state).  
+- Runs its `prep`→`exec`→`post` cycle.  
+- Inspects the returned **action** label.  
+- Follows the matching outgoing edge to the next node.  
+- Stops when no successor is found (with optional warning).
+
+Advanced variants like **BatchFlow** and **AsyncFlow** build atop this core logic; we’ll cover them in later chapters.
+
+---
+
+## 2. Key Concepts
+
+### 2.1 Defining & Starting a Flow
+
+```python
+from pocketflow import Flow
+
+flow = Flow()                   # create a Flow
+start_node = LoadReadingsNode(db_client)
+flow.start(start_node)          # designate the entry point
+```
+
+- `flow.start(node)` stores `node` as the start of orchestration and returns it (for chaining).
+
+### 2.2 Wiring Transitions
+
+Use the `>>` operator to connect Nodes on the **default** action:
+
+```python
+start_node >> transform_node
+transform_node >> save_node
+```
+
+Or branch on custom action labels:
+
+```python
+load_node - "no_data" >> handle_no_data_node
+```
+
+Internally, this populates each node’s `successors` map:
+
+- `node.successors["default"] = next_node`
+- `node.successors["no_data"] = handler_node`
+
+### 2.3 Running a Flow
+
+Once nodes are wired, call:
+
+```python
+final_action = flow.run(shared_state)
+```
+
+- **`shared_state`** (`dict`) carries inputs (`"query"`) and accumulates outputs (`"records"`, `"cleaned"`, `"status"`).
+- The Flow:
+  1. Calls optional `flow.prep(shared_state)`.  
+  2. Enters its orchestration loop:
+     - Clones the current node.  
+     - Pushes Flow parameters via `node.set_params(...)`.  
+     - Runs `node._run(shared_state)` → an action string.  
+     - Looks up the successor in `node.successors`.  
+     - Repeats until no successor is found.  
+  3. Calls optional `flow.post(shared_state, prep_res, last_action)` and returns `last_action`.
+
+### 2.4 Visualizing the Graph
+
+```mermaid
+graph LR
+  LoadReadingsNode -- "default" --> TransformReadingsNode
+  TransformReadingsNode -- "default" --> SaveResultsNode
+  LoadReadingsNode -- "no_data" --> AlertNoDataNode
+```
+
+---
+
+## 3. Solving the ETL Pipeline
+
+Here’s a complete, self‐contained example:
+
+```python
+# file: etl_flow.py
+from pocketflow import Flow
+from etl_nodes import LoadReadingsNode, TransformReadingsNode, SaveResultsNode, AlertNoDataNode
+
+# 1. Instantiate nodes
+load_node      = LoadReadingsNode(db_client, max_retries=3, wait=1)
+transform_node = TransformReadingsNode()
+save_node      = SaveResultsNode(store_client)
+no_data_node   = AlertNoDataNode()
+
+# 2. Build the flow
+flow = Flow()
+flow.start(load_node)
+
+# Default path: load → transform → save
+load_node >> transform_node
+transform_node >> save_node
+
+# Branch on no‐data
+load_node - "no_data" >> no_data_node
+
+# 3. Prepare shared state and run
+shared_state = {
+    "query": "SELECT * FROM sensors WHERE ts > NOW() - INTERVAL '1 HOUR'"
+}
+final_action = flow.run(shared_state)
+
+print(f"Final action: {final_action}")
+print("Shared state:", shared_state)
+```
+
+What happens:
+
+- `LoadReadingsNode` reads `"query"` and writes `"records"`.  
+- If no records: it returns `"no_data"`, routing to `AlertNoDataNode`.  
+- Otherwise returns `"default"`, moves to `TransformReadingsNode`, which writes `"cleaned"`.  
+- Next, `SaveResultsNode` persists the data and writes `"status"`.  
+- When `SaveResultsNode.post` returns `"default"`, Flow finds no more successors and exits.  
+- `final_action` is the last action label; `shared_state` holds all intermediate data.
+
+---
+
+## 4. Internal Orchestration Walkthrough
+
+### 4.1 Step‐by‐Step (Non‐Code)
+
+1. **Flow.run(shared)** is invoked.  
+2. **Flow.prep(shared)** runs (by default, a no-op).  
+3. The **orchestrator loop** (`_orch`):
+   - **Clone** the start node via `copy.copy`.  
+   - **Set parameters** on the node.  
+   - **Execute** the node’s `_run(shared)` (prep→exec→post).  
+   - **Receive** an action label.  
+   - **Lookup** the successor node for that action.  
+   - **Repeat** with a fresh clone of the successor.  
+4. Loop **ends** when no successor is found (warning if edges existed).  
+5. **Flow.post(shared, prep_res, exec_res)** runs (default returns the last action).  
+6. **Flow.run** returns the final action label.
+
+### 4.2 Sequence Diagram
+
+```mermaid
+sequenceDiagram
+  participant U   as User Code
+  participant Flow as Flow
+  participant A   as LoadReadingsNode
+  participant B   as TransformReadingsNode
+  participant C   as SaveResultsNode
+  participant S   as Shared State
+
+  U->>Flow: run(shared)
+  Flow->>Flow: prep(shared)
+  Flow->>A: copy & set_params
+  A->>S: prep(shared)
+  A->>A: exec(prep_res)
+  A->>S: post(shared,exec_res)
+  A-->>Flow: returns "default"
+  Flow->>B: get_next_node & copy
+  B->>S: prep(shared)
+  B->>B: exec()
+  B->>S: post()
+  B-->>Flow: returns "default"
+  Flow->>C: get_next_node & copy
+  C->>S: prep(shared)
+  C->>C: exec()
+  C->>S: post()
+  C-->>Flow: returns "default"
+  Flow->>Flow: no successor → exit
+  Flow->>Flow: post(shared,_,exec_res)
+  Flow-->>U: return final_action
+```
+
+### 4.3 Core Implementation Snippets
+
+**File:** `pocketflow/__init__.py`
+
+```python
+class Flow(BaseNode):
+    def __init__(self, start=None):
+        super().__init__()
+        self.start_node = start
+
+    def start(self, start_node):
+        """Designate the start node of this Flow."""
+        self.start_node = start_node
+        return start_node
+
+    def _run(self, shared):
+        # 1) Flow‐level prep hook
+        prep_res = self.prep(shared)
+        # 2) Orchestrate all Nodes
+        exec_res = self._orch(shared)
+        # 3) Flow‐level post hook
+        return self.post(shared, prep_res, exec_res)
+
+    def _orch(self, shared, params=None):
+        import copy
+        curr = copy.copy(self.start_node)
+        p = params or {**self.params}
+        last_action = None
+
+        while curr:
+            curr.set_params(p)
+            last_action = curr._run(shared)
+            nxt = self.get_next_node(curr, last_action)
+            curr = copy.copy(nxt) if nxt else None
+
+        return last_action
+
+    def get_next_node(self, curr, action):
+        nxt = curr.successors.get(action or "default")
+        if not nxt and curr.successors:
+            warnings.warn(
+                f"Flow ends: action '{action}' not in successors {list(curr.successors)}"
+            )
+        return nxt
+
+    def post(self, shared, prep_res, exec_res):
+        # By default, return the last action label
+        return exec_res
+```
+
+- **Cloning** with `copy.copy` resets any transient state on nodes (e.g., retry counters).  
+- **`set_params`** pushes Flow‐wide parameters into each Node before execution.  
+- **Warning** if a Node returns an action with no matching edge but had successors defined.
+
+---
+
+## 5. Analogy & Insights
+
+- Think of **Flow** as a **packet router**:  
+  - **Packets** = shared state.  
+  - **Routers** = Nodes.  
+  - **Routing tags** = action strings.  
+  - **Flow** reads a tag and forwards the packet along that link.
+
+- Or like a **finite‐state machine**:  
+  - **States** = Nodes.  
+  - **Transition labels** = actions.  
+  - **Flow** executes transitions until reaching a terminal state (no outgoing transitions).
+
+---
+
+## 6. Summary & Next Steps
+
+You’ve learned how to:
+
+- Instantiate and start a **Flow**.  
+- Wire Nodes into a directed graph with `>>` and conditional transitions.  
+- Execute `flow.run(shared_state)` to process your shared context through the graph.  
+- Understand Flow’s internal orchestration loop, including node cloning, parameter propagation, and edge‐lookup warnings.  
+- Leverage optional Flow‐level `prep`/`post` hooks for custom setup and teardown.
+
+Next up: extending Flow for **batch processing**, where you run multiple parameter sets through the same graph, in sequence or in parallel, using **BatchNode** and **BatchFlow** in [Batch Processing (BatchNode & BatchFlow)](03_batch_processing__batchnode___batchflow__.md).
+
+---
+
+Generated by fork of [AI Codebase Knowledge Builder](https://github.com/vegeta03/PocketFlow-Tutorial-Codebase-Knowledge.git)
